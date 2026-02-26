@@ -8,13 +8,20 @@ set -euo pipefail
 
 # ---- Environment setup ----
 module load ffmpeg-6.0-gcc-12.1.0
-module load cuda-12.9.0-gcc-12.1.0
+# NOTE: Do NOT load cuda-12.9.0 – PyTorch 2.10 ships its own CUDA 12.8 runtime.
+# Loading cuda-12.9 causes CUBLAS_STATUS_INVALID_VALUE in all bf16 matmuls.
+# module load cuda-12.9.0-gcc-12.1.0
 module load cmake/3.30.2
 module load mamba/latest
 source activate new_beginning
 export PATH="${HOME}/.local/bin:${PATH}"
 export HF_HOME="/scratch/jnolas77/.hf_cache"
-export HF_TOKEN="<HF-TOKEN>"
+export HF_TOKEN="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"
+# Restrict to single GPU – QLoRA 4-bit model (~10GB) fits on one A100-80GB.
+# Prevents Trainer from wrapping in DataParallel which causes CUBLAS errors.
+export CUDA_VISIBLE_DEVICES=0
+# Force cuBLASLt backend – more tolerant of CUDA version mismatches
+export TORCH_BLAS_PREFER_CUBLASLT=1
 
 
 # ---- Paths ----
@@ -24,7 +31,7 @@ DATA_JSON="${DATA_ROOT}/data.json"
 DATA_DIR="/scratch/jnolas77/SafetyVLM/Qwen-3-VL/data"
 OUTPUT_DIR="${SCRIPT_DIR}/checkpoints"
 mkdir -p "${OUTPUT_DIR}"
-MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-VL-32B-Instruct"
 
 # ---- Step 1: Build the instruction-tuning dataset (skip if already built) ----
 if [ ! -f "${DATA_DIR}/train.jsonl" ]; then
@@ -54,16 +61,15 @@ echo "  Step 2: Fine-tuning ${MODEL_NAME} with QLoRA"
 echo "  GPUs: $(nvidia-smi --query-gpu=name --format=csv,noheader | paste -sd ', ')"
 echo "============================================================"
 
-# Use accelerate for multi-GPU (2× A100-80GB)
-# If accelerate config doesn't exist, run with defaults
-NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
-
-# device_map="auto" handles multi-GPU model parallelism internally,
-# so we launch a SINGLE process and let from_pretrained split the model.
+# FP8 model (~30GB) fits across 2× A100-80GB via HF device_map="auto".
+# We use a single process so device_map handles GPU sharding internally
+# (accelerate multi-GPU conflicts with device_map="auto").
 LAUNCH_CMD="python3"
 
 ${LAUNCH_CMD} "${SCRIPT_DIR}/train_teacher.py" \
     --model_name            "${MODEL_NAME}" \
+    --load_in_4bit \
+    --attn_implementation   eager \
     --data_dir              "${DATA_DIR}" \
     --output_dir            "${OUTPUT_DIR}" \
     --num_train_epochs      3 \
@@ -75,7 +81,7 @@ ${LAUNCH_CMD} "${SCRIPT_DIR}/train_teacher.py" \
     --warmup_ratio          0.05 \
     --weight_decay          0.01 \
     --max_grad_norm         1.0 \
-    --max_seq_length        4096 \
+    --max_seq_length        2048 \
     --lora_r                64 \
     --lora_alpha            128 \
     --lora_dropout          0.05 \
