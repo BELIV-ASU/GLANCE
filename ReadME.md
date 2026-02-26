@@ -7,6 +7,8 @@ module load mamba/latest
 ```
 # Training cmd
 ```
+chmod +x train.sh
+./train.sh
 ```
 
 # Distill cmd
