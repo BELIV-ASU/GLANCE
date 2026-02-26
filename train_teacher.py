@@ -26,14 +26,15 @@ from typing import Optional, List, Dict, Any
 
 import torch
 from transformers import (
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen2VLForConditionalGeneration,
     AutoProcessor,
     BitsAndBytesConfig,
     TrainingArguments,
 )
+
+from transformers import Qwen3VLMoeForConditionalGeneration
+
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
-from trl import SFTTrainer, SFTConfig
+from transformers import Trainer
 from datasets import Dataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
@@ -49,19 +50,19 @@ class TeacherArgs:
     # Model
     model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct"
     trust_remote_code: bool = True
-    attn_implementation: str = "flash_attention_2"
+    attn_implementation: str = "sdpa"
 
-    # Quantisation (QLoRA)
-    load_in_4bit: bool = True
+    # Quantisation – disabled: bf16 LoRA fits on 2×A100-80GB (30B×2B=60GB)
+    load_in_4bit: bool = False
     bnb_4bit_compute_dtype: str = "bfloat16"
     bnb_4bit_quant_type: str = "nf4"
-    bnb_4bit_use_double_quant: bool = True
+    bnb_4bit_use_double_quant: bool = False
 
     # LoRA
     lora_r: int = 64
     lora_alpha: int = 128
     lora_dropout: float = 0.05
-    lora_target_modules: str = "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+    lora_target_modules: str = "q_proj,k_proj,v_proj,o_proj"  # attention only – MoE experts use fused gate_up_proj
     lora_bias: str = "none"
 
     # Data
@@ -123,13 +124,18 @@ def parse_args() -> TeacherArgs:
 # ---------------------------------------------------------------------------
 
 def load_jsonl(path: str) -> List[Dict]:
-    """Load JSONL -> list of dicts."""
+    """Load JSONL -> list of dicts (robust to encoding edge-cases)."""
     data = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for i, line in enumerate(f, 1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 data.append(json.loads(line))
+            except json.JSONDecodeError:
+                # Skip malformed lines instead of crashing
+                log.warning(f"Skipping malformed JSONL line {i} in {path}")
     return data
 
 
@@ -155,52 +161,45 @@ def make_hf_dataset(jsonl_path: str, max_samples: int = 0) -> Dataset:
 # ---------------------------------------------------------------------------
 
 def load_model_and_processor(args: TeacherArgs):
-    """Load Qwen3-VL-32B with QLoRA quantisation + LoRA adapters."""
+    """Load Qwen3-VL-30B-A3B (MoE) with LoRA adapters in bf16."""
 
     log.info(f"Loading model: {args.model_name}")
-
-    # BitsAndBytes config for 4-bit
     compute_dtype = getattr(torch, args.bnb_4bit_compute_dtype)
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=args.load_in_4bit,
-        bnb_4bit_compute_dtype=compute_dtype,
-        bnb_4bit_quant_type=args.bnb_4bit_quant_type,
-        bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
-    )
 
-    # Try Qwen3-VL first, fall back to Qwen2.5-VL class
-    model_cls = None
-    for cls in [Qwen2_5_VLForConditionalGeneration, Qwen2VLForConditionalGeneration]:
-        try:
-            model = cls.from_pretrained(
-                args.model_name,
-                quantization_config=bnb_config,
-                torch_dtype=compute_dtype,
-                trust_remote_code=args.trust_remote_code,
-                attn_implementation=args.attn_implementation,
-                device_map="auto",
-            )
-            model_cls = cls
-            break
-        except Exception as e:
-            log.warning(f"{cls.__name__} failed: {e}, trying next...")
-            continue
-
-    if model_cls is None:
-        # Generic auto
-        from transformers import AutoModelForCausalLM
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name,
-            quantization_config=bnb_config,
-            torch_dtype=compute_dtype,
-            trust_remote_code=args.trust_remote_code,
-            device_map="auto",
+    # Build quantization config only if 4-bit is requested
+    quant_kwargs = {}
+    if args.load_in_4bit:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_quant_type=args.bnb_4bit_quant_type,
+            bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
         )
+        quant_kwargs["quantization_config"] = bnb_config
 
-    # Prepare for k-bit training
-    model = prepare_model_for_kbit_training(
-        model, use_gradient_checkpointing=args.gradient_checkpointing
+    # Qwen3-VL-30B-A3B is MoE → must use the MoE class
+    log.info("Using Qwen3VLMoeForConditionalGeneration (MoE architecture)")
+    model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
+        args.model_name,
+        **quant_kwargs,
+        torch_dtype=compute_dtype,
+        trust_remote_code=args.trust_remote_code,
+        attn_implementation=args.attn_implementation,
+        device_map="auto",
     )
+
+    # Prepare for k-bit training (only needed with quantization)
+    if args.load_in_4bit:
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=args.gradient_checkpointing
+        )
+    else:
+        # bf16 LoRA: enable gradient checkpointing manually
+        if args.gradient_checkpointing:
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+        model.enable_input_require_grads()  # needed for LoRA
 
     # LoRA config
     target_modules = [m.strip() for m in args.lora_target_modules.split(",")]
@@ -383,7 +382,7 @@ def main():
     )
 
     # ---- Training config ----
-    training_args = SFTConfig(
+    training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -406,13 +405,11 @@ def main():
         dataloader_num_workers=args.dataloader_num_workers,
         report_to=args.report_to,
         seed=args.seed,
-        max_seq_length=args.max_seq_length,
-        dataset_text_field=None,  # we use a custom collator
         remove_unused_columns=False,
     )
 
     # ---- Trainer ----
-    trainer = SFTTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
