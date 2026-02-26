@@ -14,7 +14,7 @@ module load mamba/latest
 source activate new_beginning
 export PATH="${HOME}/.local/bin:${PATH}"
 export HF_HOME="/scratch/jnolas77/.hf_cache"
-export HF_TOKEN="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"
+export HF_TOKEN="<HF-TOKEN>"
 
 
 # ---- Paths ----
