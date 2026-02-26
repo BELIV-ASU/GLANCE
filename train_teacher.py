@@ -1,6 +1,6 @@
 """
-train_teacher.py  –  Fine-tune Qwen3-VL as a SafetyVLM Teacher
-using QLoRA (4-bit NF4) + LoRA on 2× A100-80GB.
+train_teacher.py  –  Fine-tune Qwen2.5-VL-32B as a SafetyVLM Teacher
+using LoRA on 2× A100-80GB.
 
 Training paradigm:
   • Chain-of-Thought (CoT)    – <think>…</think> reasoning before answers
@@ -25,13 +25,16 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 
 import torch
+# Force cublasLt backend – avoids CUBLAS_STATUS_INVALID_VALUE bugs
+# caused by CUDA 12.8/12.9 version mismatch with PyTorch 2.10
+torch.backends.cuda.preferred_blas_library("cublaslt")
+
 from transformers import (
     AutoProcessor,
+    Qwen2_5_VLForConditionalGeneration,
     BitsAndBytesConfig,
     TrainingArguments,
 )
-
-from transformers import Qwen3VLMoeForConditionalGeneration
 
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
 from transformers import Trainer
@@ -42,21 +45,52 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+#  Monkey-patch: fix CUBLAS_STATUS_INVALID_VALUE in rotary embeddings
+#  PyTorch 2.10+cu128 has a bug in cublasSgemmStridedBatched with the
+#  specific tensor shapes used by Qwen2.5-VL M-RoPE.
+#  torch.einsum produces identical results but avoids the buggy kernel.
+# ---------------------------------------------------------------------------
+import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as _qwen25vl
+
+_orig_rope_forward = _qwen25vl.Qwen2_5_VLRotaryEmbedding.forward
+
+def _patched_rope_forward(self, x, position_ids):
+    inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(
+        3, position_ids.shape[1], -1, 1
+    )
+    position_ids_expanded = position_ids[:, :, None, :].float()
+    device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        # Use einsum instead of @ to avoid cublasSgemmStridedBatched bug
+        freqs = torch.einsum("abcd,abde->abce", inv_freq_expanded, position_ids_expanded).transpose(2, 3)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos() * self.attention_scaling
+        sin = emb.sin() * self.attention_scaling
+    return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+_qwen25vl.Qwen2_5_VLRotaryEmbedding.forward = _patched_rope_forward
+log.info("Patched Qwen2_5_VLRotaryEmbedding.forward (einsum workaround for CUBLAS bug)")
+
+
+# ---------------------------------------------------------------------------
 #  Training arguments
 # ---------------------------------------------------------------------------
 
 @dataclass
 class TeacherArgs:
     # Model
-    model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    model_name: str = "Qwen/Qwen2.5-VL-32B-Instruct"
     trust_remote_code: bool = True
-    attn_implementation: str = "sdpa"
+    # Use eager attention to avoid potential SDPA CUBLAS issues
+    attn_implementation: str = "eager"
 
-    # Quantisation – disabled: bf16 LoRA fits on 2×A100-80GB (30B×2B=60GB)
-    load_in_4bit: bool = False
+    # Quantisation – QLoRA 4-bit (NF4 + double quant)
+    # Bypasses buggy cublas bf16 kernels (PyTorch 2.10+cu128)
+    # and shrinks 32B model from ~64GB to ~10GB
+    load_in_4bit: bool = True
     bnb_4bit_compute_dtype: str = "bfloat16"
     bnb_4bit_quant_type: str = "nf4"
-    bnb_4bit_use_double_quant: bool = False
+    bnb_4bit_use_double_quant: bool = True
 
     # LoRA
     lora_r: int = 64
@@ -87,7 +121,7 @@ class TeacherArgs:
     gradient_checkpointing: bool = True
     bf16: bool = True
     tf32: bool = True
-    dataloader_num_workers: int = 4
+    dataloader_num_workers: int = 1
 
     # Logging / saving
     logging_steps: int = 5
@@ -161,7 +195,7 @@ def make_hf_dataset(jsonl_path: str, max_samples: int = 0) -> Dataset:
 # ---------------------------------------------------------------------------
 
 def load_model_and_processor(args: TeacherArgs):
-    """Load Qwen3-VL-30B-A3B (MoE) with LoRA adapters in bf16."""
+    """Load Qwen2.5-VL with LoRA adapters."""
 
     log.info(f"Loading model: {args.model_name}")
     compute_dtype = getattr(torch, args.bnb_4bit_compute_dtype)
@@ -177,16 +211,20 @@ def load_model_and_processor(args: TeacherArgs):
         )
         quant_kwargs["quantization_config"] = bnb_config
 
-    # Qwen3-VL-30B-A3B is MoE → must use the MoE class
-    log.info("Using Qwen3VLMoeForConditionalGeneration (MoE architecture)")
-    model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
+    # Qwen2.5-VL-32B-Instruct
+    log.info("Using Qwen2_5_VLForConditionalGeneration")
+    # device_map={"":  0} streams weights directly to cuda:0 shard-by-shard
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         args.model_name,
         **quant_kwargs,
         torch_dtype=compute_dtype,
         trust_remote_code=args.trust_remote_code,
         attn_implementation=args.attn_implementation,
-        device_map="auto",
+        low_cpu_mem_usage=True,
+        device_map={"": 0},
     )
+    # Disable cache for training + gradient checkpointing
+    model.config.use_cache = False
 
     # Prepare for k-bit training (only needed with quantization)
     if args.load_in_4bit:
@@ -220,6 +258,10 @@ def load_model_and_processor(args: TeacherArgs):
         args.model_name,
         trust_remote_code=args.trust_remote_code,
         padding_side="right",
+        # Limit image resolution to prevent image tokens from exceeding
+        # max_seq_length.  512 patches * 28 * 28 = 401408 pixels ≈ 512 visual tokens
+        min_pixels=3136,     # minimum 4 patches (2×2)
+        max_pixels=401408,   # ~512 visual tokens – leaves room for text in 2048 seq
     )
     # Ensure pad token
     if processor.tokenizer.pad_token is None:
@@ -232,8 +274,8 @@ def load_model_and_processor(args: TeacherArgs):
 #  Collator for VLM chat
 # ---------------------------------------------------------------------------
 
-class Qwen3VLCollator:
-    """Custom collator that processes Qwen3-VL chat messages into model inputs.
+class QwenVLCollator:
+    """Custom collator that processes Qwen2.5-VL chat messages into model inputs.
 
     Handles both text-only and image+text conversations.
     Supports Chain-of-Thought aware label masking:
@@ -309,17 +351,27 @@ class Qwen3VLCollator:
 
         # Process text + images through the Qwen VL processor
         # The processor handles image → pixel_values + image_grid_thw
+        # NOTE: Do NOT pass truncation=True here — it truncates input_ids
+        # after image token expansion, causing a mismatch with pixel_values.
+        # Instead, we cap image resolution via max_pixels on the processor
+        # and truncate manually below.
         proc_kwargs = dict(
             text=texts,
             padding=True,
-            truncation=True,
-            max_length=self.max_seq_length,
             return_tensors="pt",
         )
         if has_any_image:
             proc_kwargs["images"] = all_images
 
         batch_inputs = self.processor(**proc_kwargs)
+
+        # Manual truncation — safe because image tokens are already bounded
+        seq_len = batch_inputs["input_ids"].size(1)
+        if seq_len > self.max_seq_length:
+            for key in batch_inputs:
+                if isinstance(batch_inputs[key], torch.Tensor) and batch_inputs[key].ndim >= 2:
+                    if batch_inputs[key].size(1) == seq_len:
+                        batch_inputs[key] = batch_inputs[key][:, :self.max_seq_length]
 
         # Labels = input_ids (model shifts internally)
         batch_inputs["labels"] = batch_inputs["input_ids"].clone()
@@ -346,7 +398,7 @@ def main():
     args = parse_args()
 
     log.info("=" * 60)
-    log.info("  SafetyVLM Teacher Training – Qwen3-VL-32B + QLoRA")
+    log.info("  SafetyVLM Teacher Training – Qwen2.5-VL-32B + LoRA")
     log.info("=" * 60)
 
     # Ensure output dirs
@@ -375,7 +427,7 @@ def main():
     model, processor = load_model_and_processor(args)
 
     # ---- Collator (CoT-aware) ----
-    collator = Qwen3VLCollator(
+    collator = QwenVLCollator(
         processor,
         max_seq_length=args.max_seq_length,
         mask_think=args.mask_think_tokens,
