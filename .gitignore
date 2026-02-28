@@ -2,3 +2,8 @@ data/
 checkpoints/
 *.log
 *.json
+data_drivelm/
+__pycache__/
+*.jsonl
+*.pyc
+viz_ckpt200/
