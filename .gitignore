@@ -1,2 +1,4 @@
 data/
 checkpoints/
+*.log
+*.json

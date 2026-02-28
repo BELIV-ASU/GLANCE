@@ -100,13 +100,13 @@ class TeacherArgs:
     lora_bias: str = "none"
 
     # Data
-    data_dir: str = "/scratch/jnolas77/SafetyVLM/Qwen-3-VL/data"
+    data_dir: str = "/scratch/rbaskar5/GLANCE/data_drivelm"
     max_seq_length: int = 4096  # longer for CoT reasoning chains
     max_samples: int = 0  # 0 = all
     mask_think_tokens: bool = False  # if True, only compute loss after </think>
 
     # Training hyper-params
-    output_dir: str = "/scratch/jnolas77/SafetyVLM/Qwen-3-VL/checkpoints"
+    output_dir: str = "/scratch/rbaskar5/GLANCE/checkpoints"
     num_train_epochs: int = 3
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 1
@@ -305,7 +305,14 @@ class QwenVLCollator:
         return 0  # not found → don't mask anything
 
     def _load_images_from_messages(self, messages: List[Dict]) -> List:
-        """Extract and load PIL images from the message content list."""
+        """Extract and load PIL images from the message content list.
+
+        Handles both standard RGB images and 16-bit depth maps (saved as
+        mode "I;16" PNG by compute_depth.py).  Depth maps are normalised
+        to 8-bit and converted to 3-channel grayscale RGB so the VL
+        processor receives a uniform (H, W, 3) uint8 tensor.
+        """
+        import numpy as np
         from PIL import Image as PILImage
         images = []
         for msg in messages:
@@ -320,7 +327,20 @@ class QwenVLCollator:
                     img_path = img_path[7:]
                 if os.path.isfile(img_path):
                     try:
-                        images.append(PILImage.open(img_path).convert("RGB"))
+                        pil_img = PILImage.open(img_path)
+                        # 16-bit depth maps need special handling
+                        if pil_img.mode in ("I;16", "I"):
+                            arr = np.array(pil_img, dtype=np.float32)
+                            a_min, a_max = arr.min(), arr.max()
+                            if a_max - a_min > 1e-6:
+                                arr = (arr - a_min) / (a_max - a_min) * 255.0
+                            arr = arr.astype(np.uint8)
+                            pil_img = PILImage.fromarray(
+                                np.stack([arr, arr, arr], axis=-1), mode="RGB"
+                            )
+                        else:
+                            pil_img = pil_img.convert("RGB")
+                        images.append(pil_img)
                     except Exception:
                         pass
         return images
@@ -410,13 +430,18 @@ def main():
 
     if not os.path.isfile(train_path):
         log.info("Training data not found – building dataset first...")
-        from safety_data import build_dataset, save_dataset
-        ds = build_dataset(
-            data_json="/scratch/jnolas77/SafetyVLM/driving_handbook_data/data.json",
-            data_root="/scratch/jnolas77/SafetyVLM/driving_handbook_data",
-            seed=args.seed,
-        )
-        save_dataset(ds, args.data_dir)
+        from data import main as build_drivelm_data
+        import sys
+        sys.argv = [
+            "data.py",
+            "--data_json", "/scratch/rbaskar5/Dataset/DriveLM/v1_1_train_nus.json",
+            "--data_root", "/scratch/rbaskar5/Dataset/DriveLM",
+            "--output_dir", args.data_dir,
+            "--val_ratio", "0.05",
+            "--seed", str(args.seed),
+            "--with_depth",
+        ]
+        build_drivelm_data()
 
     log.info(f"Loading training data from {train_path}")
     train_dataset = make_hf_dataset(train_path, args.max_samples)

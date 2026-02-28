@@ -15,7 +15,7 @@ module load cmake/3.30.2
 module load mamba/latest
 source activate new_beginning
 export PATH="${HOME}/.local/bin:${PATH}"
-export HF_HOME="/scratch/jnolas77/.hf_cache"
+export HF_HOME="/scratch/rbaskar5/.hf_cache"
 export HF_TOKEN="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"
 # Restrict to single GPU – QLoRA 4-bit model (~10GB) fits on one A100-80GB.
 # Prevents Trainer from wrapping in DataParallel which causes CUBLAS errors.
@@ -26,9 +26,9 @@ export TORCH_BLAS_PREFER_CUBLASLT=1
 
 # ---- Paths ----
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATA_ROOT="/scratch/jnolas77/SafetyVLM/driving_handbook_data"
-DATA_JSON="${DATA_ROOT}/data.json"
-DATA_DIR="/scratch/jnolas77/SafetyVLM/Qwen-3-VL/data"
+DATA_ROOT="/scratch/rbaskar5/Dataset/DriveLM"
+DATA_JSON="${DATA_ROOT}/v1_1_train_nus.json"
+DATA_DIR="${SCRIPT_DIR}/data_drivelm"
 OUTPUT_DIR="${SCRIPT_DIR}/checkpoints"
 mkdir -p "${OUTPUT_DIR}"
 MODEL_NAME="Qwen/Qwen2.5-VL-32B-Instruct"
@@ -36,14 +36,15 @@ MODEL_NAME="Qwen/Qwen2.5-VL-32B-Instruct"
 # ---- Step 1: Build the instruction-tuning dataset (skip if already built) ----
 if [ ! -f "${DATA_DIR}/train.jsonl" ]; then
     echo "============================================================"
-    echo "  Step 1: Building dataset from driving handbook..."
+    echo "  Step 1: Building dataset from DriveLM..."
     echo "============================================================"
-    python3 "${SCRIPT_DIR}/safety_data.py" \
+    python3 "${SCRIPT_DIR}/data.py" \
         --data_json  "${DATA_JSON}" \
         --data_root  "${DATA_ROOT}" \
         --output_dir "${DATA_DIR}" \
         --val_ratio  0.05 \
-        --seed       42
+        --seed       42 \
+        --with_depth
 else
     echo "============================================================"
     echo "  Step 1: Dataset already exists, skipping build."
