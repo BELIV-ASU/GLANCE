@@ -31,10 +31,12 @@ python3 distill_4b.py \
 ```
 
 ## Model Info
-- **Base model**: `Qwen/Qwen2.5-VL-7B-Instruct`
+- ### Workstation
+- **Base model**: `Qwen/Qwen2.5-VL-7B-Instruct(Distilled)`
 - **LoRA adapter**: `checkpoints/` (r=16, alpha=32)
 - **GPU**: NVIDIA RTX 5000 Ada (30GB VRAM)
 - **Quantization**: 4-bit NF4 via bitsandbytes
+- ### Jetson Orion AGX
 
 ## Datasets and Checkpoints
 [Dataset here](https://www.dropbox.com/scl/fo/d6wpk16zpd7vxbl4c8ncu/APyLVdMgb0RX2qCf9uLWrTI?rlkey=p7xjrap2w1j3bja5js4bkxv1u&st=vu9cwbqj&dl=0)
