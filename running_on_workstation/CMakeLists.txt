@@ -1,14 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
-project(tinyvlm_jetson LANGUAGES CXX C)
+project(tinyvlm LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ─── Options ──────────────────────────────────────────────
-option(GGML_CUDA       "Enable CUDA backend (Jetson AGX Orin)"  ON)
-option(BUILD_SHARED_LIBS "Build shared libraries"                OFF)
+option(GGML_CUDA       "Enable CUDA backend in llama.cpp"  ON)
+option(BUILD_SHARED_LIBS "Build shared libraries"          OFF)
 
-# ─── Fetch llama.cpp ─────────────────────────────────────
+# ─── Fetch llama.cpp (includes multimodal / mtmd) ────────
 include(FetchContent)
 FetchContent_Declare(
     llama_cpp
@@ -17,14 +17,15 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
+# llama.cpp build options
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
 
 if(GGML_CUDA)
     set(GGML_CUDA ON CACHE BOOL "" FORCE)
-    # Jetson AGX Orin = sm_87 (Ampere)
-    set(CMAKE_CUDA_ARCHITECTURES "87" CACHE STRING "" FORCE)
 endif()
 
 set(LLAMA_MMAP  ON CACHE BOOL "" FORCE)
@@ -32,13 +33,13 @@ set(LLAMA_MLOCK ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(llama_cpp)
 
-# ─── tinyvlm_jetson executable ───────────────────────────
-add_executable(tinyvlm_jetson
+# ─── tinyvlm executable ─────────────────────────────────
+add_executable(tinyvlm
     src/main.cpp
     src/vlm.cpp
 )
 
-target_include_directories(tinyvlm_jetson PRIVATE
+target_include_directories(tinyvlm PRIVATE
     src/
     ${llama_cpp_SOURCE_DIR}/include
     ${llama_cpp_SOURCE_DIR}/ggml/include
@@ -46,7 +47,7 @@ target_include_directories(tinyvlm_jetson PRIVATE
     ${llama_cpp_SOURCE_DIR}/tools/mtmd
 )
 
-target_link_libraries(tinyvlm_jetson PRIVATE
+target_link_libraries(tinyvlm PRIVATE
     llama
     ggml
     common
@@ -54,7 +55,7 @@ target_link_libraries(tinyvlm_jetson PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(tinyvlm_jetson PRIVATE /W3 /O2)
+    target_compile_options(tinyvlm PRIVATE /W3 /O2)
 else()
-    target_compile_options(tinyvlm_jetson PRIVATE -Wall -Wextra -O2)
+    target_compile_options(tinyvlm PRIVATE -Wall -Wextra -O2)
 endif()

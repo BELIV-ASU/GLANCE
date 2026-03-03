@@ -9,7 +9,7 @@
  *   - KV cache management
  *   - Layer offloading (GPU/CPU split via n_gpu_layers + mmap)
  *
- * We just drive the high-level flow:
+ * We drive the high-level flow:
  *   1. Build chat prompt with image markers
  *   2. Let mtmd tokenize + encode images
  *   3. Feed chunks through llama_decode
@@ -21,13 +21,13 @@
 #include "llama.h"
 #include "common.h"
 #include "mtmd.h"
+#include "mtmd-helper.h"
 
 #include <iostream>
 #include <chrono>
 #include <algorithm>
 #include <thread>
 #include <cstring>
-#include <fstream>
 
 namespace tinyvlm {
 
@@ -35,18 +35,18 @@ namespace tinyvlm {
 //  VLMConfig presets
 // ═══════════════════════════════════════════════════════════
 
-VLMConfig VLMConfig::for_gtx1650(const std::string& model_path,
+VLMConfig VLMConfig::for_rtx5000(const std::string& model_path,
                                   const std::string& mmproj_path) {
     VLMConfig c;
     c.model_path  = model_path;
     c.mmproj_path = mmproj_path;
 
-    c.n_ctx       = 4096;
-    c.n_batch     = 2048;
-    c.n_ubatch    = 512;
+    c.n_ctx       = 8192;
+    c.n_batch     = 4096;
+    c.n_ubatch    = 1024;
     c.use_mmap    = true;
     c.flash_attn  = true;
-    c.n_gpu_layers = -1;  // auto
+    c.n_gpu_layers = -1;    // auto — will offload all layers
     c.n_threads   = std::max(1, (int)std::thread::hardware_concurrency() - 1);
 
     c.temperature    = 0.7f;
@@ -59,7 +59,7 @@ VLMConfig VLMConfig::for_gtx1650(const std::string& model_path,
 }
 
 // ═══════════════════════════════════════════════════════════
-//  Auto GPU layers for 4GB VRAM
+//  Auto GPU layers for 30GB VRAM (RTX 5000 Ada)
 // ═══════════════════════════════════════════════════════════
 
 int VLM::auto_gpu_layers() const {
@@ -67,16 +67,9 @@ int VLM::auto_gpu_layers() const {
     //   28 decoder layers, ~120 MB each = 3.36 GB
     //   embeddings + output head ~ 600 MB
     //   vision encoder (mmproj) ~ 200-400 MB on GPU
-    //
-    // GTX 1650 4GB budget:
-    //   ~400 MB reserved (OS, display, CUDA overhead)
-    //   ~200 MB KV cache @ 4096 ctx
-    //   ~400 MB vision encoder
-    //   Remaining ~3.0 GB for decoder layers
-    //   3000 / 120 ≈ 25 layers on GPU, rest on CPU via mmap
-    //
-    // Conservative: 20 layers to leave headroom
-    return 20;
+    //   KV cache @ 8192 ctx ~ 400 MB
+    //   Total ~4.5 GB — well within 30GB VRAM
+    return 99;   // offload everything
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -130,11 +123,14 @@ bool VLM::load() {
     cp.n_ctx       = cfg_.n_ctx;
     cp.n_batch     = cfg_.n_batch;
     cp.n_ubatch    = cfg_.n_ubatch;
-    cp.flash_attn  = cfg_.flash_attn;
-    cp.n_threads       = cfg_.n_threads > 0
-                          ? cfg_.n_threads
-                          : std::max(1, (int)std::thread::hardware_concurrency() - 1);
-    cp.n_threads_batch = cp.n_threads;
+    cp.flash_attn_type = cfg_.flash_attn
+                             ? LLAMA_FLASH_ATTN_TYPE_ENABLED
+                             : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    int threads    = cfg_.n_threads > 0
+                      ? cfg_.n_threads
+                      : std::max(1, (int)std::thread::hardware_concurrency() - 1);
+    cp.n_threads       = threads;
+    cp.n_threads_batch = threads;
 
     ctx_ = llama_init_from_model(model_, cp);
     if (!ctx_) {
@@ -144,9 +140,12 @@ bool VLM::load() {
 
     // ── Multimodal context (vision encoder + projector) ──
     mtmd_context_params mcp = mtmd_context_params_default();
-    mcp.use_gpu        = (gpu_layers_ > 0);
-    mcp.n_threads      = cp.n_threads;
-    mcp.verbosity      = MTMD_LOG_LEVEL_INFO;
+    mcp.use_gpu        = (gpu_layers_ > 0) && !cfg_.vision_cpu;
+    mcp.n_threads      = threads;
+    mcp.print_timings  = true;
+
+    std::cout << "[tinyvlm] Vision encoder: "
+              << (mcp.use_gpu ? "GPU" : "CPU") << "\n";
 
     ctx_mtmd_ = mtmd_init_from_file(cfg_.mmproj_path.c_str(), model_, mcp);
     if (!ctx_mtmd_) {
@@ -176,7 +175,7 @@ bool VLM::init_sampler() {
     if (!smpl_) return false;
 
     llama_sampler_chain_add(smpl_, llama_sampler_init_penalties(
-        cfg_.repeat_penalty, 0.0f, 0.0f));
+        64, cfg_.repeat_penalty, 0.0f, 0.0f));
     llama_sampler_chain_add(smpl_, llama_sampler_init_top_k(cfg_.top_k));
     llama_sampler_chain_add(smpl_, llama_sampler_init_top_p(cfg_.top_p, 1));
     llama_sampler_chain_add(smpl_, llama_sampler_init_temp(cfg_.temperature));
@@ -192,16 +191,17 @@ bool VLM::init_sampler() {
 std::string VLM::build_prompt(const std::string& user_msg,
                                bool has_image) const {
     // Qwen2.5-VL uses <|im_start|>/<|im_end|> chat format
-    // For images: <|vision_start|><|image_pad|><|vision_end|>
-    // mtmd expects a special marker for where the image goes
+    // mtmd expects MTMD_DEFAULT_IMAGE_MARKER for where the image goes
+    std::string marker = mtmd_default_marker();
 
     std::string p;
-    p += "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n";
+    p += "<|im_start|>system\n";
+    p += cfg_.system_prompt;
+    p += "<|im_end|>\n";
     p += "<|im_start|>user\n";
     if (has_image) {
-        // mtmd_input_chunks_from_text will replace the <image> marker
-        // with actual vision embeddings
-        p += "<image>\n";
+        p += marker;
+        p += "\n";
     }
     p += user_msg;
     p += "<|im_end|>\n";
@@ -217,8 +217,13 @@ GenerationResult VLM::chat(const std::string& user_msg,
                             const TokenCallback& cb) {
     std::string prompt = build_prompt(user_msg, false);
 
+    mtmd_input_text text;
+    text.text          = prompt.c_str();
+    text.add_special   = true;
+    text.parse_special = true;
+
     mtmd_input_chunks* chunks = mtmd_input_chunks_init();
-    int rc = mtmd_tokenize(ctx_mtmd_, chunks, prompt.c_str(), nullptr, 0);
+    int32_t rc = mtmd_tokenize(ctx_mtmd_, chunks, &text, nullptr, 0);
     if (rc != 0) {
         std::cerr << "[tinyvlm] Tokenization failed (rc=" << rc << ")\n";
         mtmd_input_chunks_free(chunks);
@@ -237,8 +242,8 @@ GenerationResult VLM::chat(const std::string& user_msg,
 GenerationResult VLM::chat_with_image(const std::string& user_msg,
                                         const std::string& image_path,
                                         const TokenCallback& cb) {
-    // Load image into mtmd bitmap
-    mtmd_bitmap* bmp = mtmd_bitmap_init_from_file(image_path.c_str());
+    // Load image using mtmd helper (handles stb_image formats)
+    mtmd_bitmap* bmp = mtmd_helper_bitmap_init_from_file(ctx_mtmd_, image_path.c_str());
     if (!bmp) {
         std::cerr << "[tinyvlm] Failed to load image: " << image_path << "\n";
         return {};
@@ -246,35 +251,18 @@ GenerationResult VLM::chat_with_image(const std::string& user_msg,
 
     std::string prompt = build_prompt(user_msg, true);
 
+    mtmd_input_text text;
+    text.text          = prompt.c_str();
+    text.add_special   = true;
+    text.parse_special = true;
+
+    const mtmd_bitmap* bmp_ptr = bmp;
     mtmd_input_chunks* chunks = mtmd_input_chunks_init();
-    int rc = mtmd_tokenize(ctx_mtmd_, chunks, prompt.c_str(), &bmp, 1);
+    int32_t rc = mtmd_tokenize(ctx_mtmd_, chunks, &text, &bmp_ptr, 1);
     mtmd_bitmap_free(bmp);
 
     if (rc != 0) {
         std::cerr << "[tinyvlm] Tokenization failed (rc=" << rc << ")\n";
-        mtmd_input_chunks_free(chunks);
-        return {};
-    }
-
-    auto result = generate_from_chunks(chunks, cb);
-    mtmd_input_chunks_free(chunks);
-    return result;
-}
-
-GenerationResult VLM::chat_with_image_bytes(const std::string& user_msg,
-                                              const uint8_t* rgba,
-                                              int w, int h,
-                                              const TokenCallback& cb) {
-    mtmd_bitmap* bmp = mtmd_bitmap_init(w, h, 3, rgba);
-    if (!bmp) return {};
-
-    std::string prompt = build_prompt(user_msg, true);
-
-    mtmd_input_chunks* chunks = mtmd_input_chunks_init();
-    int rc = mtmd_tokenize(ctx_mtmd_, chunks, prompt.c_str(), &bmp, 1);
-    mtmd_bitmap_free(bmp);
-
-    if (rc != 0) {
         mtmd_input_chunks_free(chunks);
         return {};
     }
@@ -299,14 +287,21 @@ GenerationResult VLM::generate_from_chunks(mtmd_input_chunks* chunks,
     // ── Prefill: eval all chunks (text tokens + vision embeddings) ──
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    int32_t rc = mtmd_helper_eval(ctx_mtmd_, ctx_, chunks, n_past_, 0,
-                                   cfg_.n_batch);
+    llama_pos new_n_past = 0;
+    int32_t rc = mtmd_helper_eval_chunks(
+        ctx_mtmd_, ctx_, chunks,
+        n_past_,          // n_past
+        0,                // seq_id
+        cfg_.n_batch,     // n_batch
+        true,             // logits_last
+        &new_n_past       // output: new n_past
+    );
     if (rc != 0) {
-        std::cerr << "[tinyvlm] mtmd_helper_eval failed (rc=" << rc << ")\n";
+        std::cerr << "[tinyvlm] mtmd_helper_eval_chunks failed (rc=" << rc << ")\n";
         return res;
     }
-    n_past_ += mtmd_input_chunks_get_n_tokens(chunks);
-    res.tokens_prompt = n_past_;
+    res.tokens_prompt = (int)(new_n_past - n_past_);
+    n_past_ = new_n_past;
 
     auto t1 = std::chrono::high_resolution_clock::now();
     res.time_prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -337,8 +332,8 @@ GenerationResult VLM::generate_from_chunks(mtmd_input_chunks* chunks,
         res.tokens_generated++;
 
         // Feed token back
-        llama_batch_clear(batch);
-        llama_batch_add(batch, id, n_past_, {0}, true);
+        common_batch_clear(batch);
+        common_batch_add(batch, id, n_past_, {0}, true);
         n_past_++;
 
         if (llama_decode(ctx_, batch) != 0) {
@@ -363,7 +358,7 @@ GenerationResult VLM::generate_from_chunks(mtmd_input_chunks* chunks,
 // ═══════════════════════════════════════════════════════════
 
 void VLM::reset() {
-    if (ctx_) llama_kv_cache_clear(ctx_);
+    if (ctx_) llama_memory_clear(llama_get_memory(ctx_), true);
     if (smpl_) llama_sampler_reset(smpl_);
     n_past_ = 0;
 }

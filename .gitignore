@@ -1,2 +1,15 @@
 data/
-checkpoints/
+models/gguf/
+models/merged_model/
+models/checkpoints/
+video/
+.venv/
+images/
+outputs/
+running_on_workstation/build/
+running_on_jetson/build/
+__pycache__/
+*.pyc
+*.log
+*.egg-info/
+.vscode/
