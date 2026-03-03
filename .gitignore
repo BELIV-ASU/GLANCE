@@ -1,15 +1,38 @@
-data/
+# ── Build / install artifacts (colcon) ──
+build/
+install/
+log/
+
+# ── Model weights (large binary files) ──
+gguf/
 models/gguf/
 models/merged_model/
 models/checkpoints/
+
+# ── Data / media ──
+data/
 video/
-.venv/
 images/
 outputs/
-running_on_workstation/build/
-running_on_jetson/build/
+recordings/
+
+# ── Python ──
+.venv/
 __pycache__/
 *.pyc
-*.log
 *.egg-info/
+
+# ── CMake / C++ build artifacts ──
+running_on_workstation/build/
+running_on_jetson/build/
+*.o
+*.so
+*.a
+
+# ── Logs ──
+*.log
+
+# ── Editor / IDE ──
 .vscode/
+*.swp
+*~

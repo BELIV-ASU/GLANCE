@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>tinyvlm_jetson</name>
+  <version>1.0.0</version>
+  <description>
+    SafetyVLM real-time inference node for Jetson AGX Orin.
+    Subscribes to camera images, runs Qwen2.5-VL-7B (GGUF Q4_K_M)
+    via llama.cpp with CUDA acceleration, and displays results
+    in an OpenCV window.
+  </description>
+  <maintainer email="dev@example.com">GLANCE Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
+
+  <build_depend>OpenCV</build_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
