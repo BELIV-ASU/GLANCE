@@ -1,0 +1,13 @@
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+deepspeed_config:
+  deepspeed_config_file: /scratch/rbaskar5/GLANCE/configs/ds_z2_config.json
+  zero3_init_flag: false
+num_machines: 1
+num_processes: 2
+machine_rank: 0
+main_process_ip: null
+main_process_port: null
+main_training_function: main
+mixed_precision: bf16
+use_cpu: false

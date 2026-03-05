@@ -7,3 +7,4 @@ __pycache__/
 *.jsonl
 *.pyc
 viz_ckpt200/
+logs/
