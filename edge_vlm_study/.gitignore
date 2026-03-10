@@ -1,0 +1,28 @@
+# edge_vlm_study build & runtime artifacts
+build/
+install/
+log/
+eval_results/
+logs/
+
+# Model files (large binaries)
+models/*.onnx
+models/*.engine
+models/*.pt
+models/*.bin
+models/*.safetensors
+
+# Data (large datasets)
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

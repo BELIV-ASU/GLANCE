@@ -1,0 +1,107 @@
+################################################################################
+# edge_vlm_config.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+# Configuration file for the Edge VLM Traffic Violation Detection system.
+#
+# Project: Empirical Study of VLMs (7B) Performance on Edge
+#          in Real-World Traffic Violations
+################################################################################
+
+# ── Data Ingestion ───────────────────────────────────────────────────────────
+ingestion:
+  # Set to "" for live mode, or path to a RosBag2 directory for replay
+  rosbag_path: ""
+
+  camera_topics:
+    - "/camera/front/image_raw"
+    - "/camera/rear/image_raw"
+    # TODO: Add side cameras if available
+    # - "/camera/left/image_raw"
+    # - "/camera/right/image_raw"
+
+  depth_topic: "/depth/points"
+  semantic_topic: "/semantic/annotations"
+
+  # Preprocessing
+  target_width: 448
+  target_height: 448
+  queue_depth: 10
+
+# ── VLM Inference Engine ─────────────────────────────────────────────────────
+inference:
+  # Backend: tensorrt | onnxruntime | libtorch
+  backend: "tensorrt"
+
+  # Model selection (paths relative to project root)
+  models:
+    qwen2_5_7b:
+      engine_path: "models/qwen2_5_7b_distilled.engine"
+      onnx_path: "models/qwen2_5_7b_distilled.onnx"
+    cosmos_r1_7b:
+      engine_path: "models/cosmos_r1_7b_distilled.engine"
+      onnx_path: "models/cosmos_r1_7b_distilled.onnx"
+    mimo_7b:
+      engine_path: "models/mimo_7b_distilled.engine"
+      onnx_path: "models/mimo_7b_distilled.onnx"
+    open_vla_7b:
+      engine_path: "models/open_vla_7b_distilled.engine"
+      onnx_path: "models/open_vla_7b_distilled.onnx"
+    vila_7b:
+      engine_path: "models/vila_7b_distilled.engine"
+      onnx_path: "models/vila_7b_distilled.onnx"
+
+  # Active model (must match a key above)
+  active_model: "qwen2_5_7b"
+
+  # Engine settings
+  device_id: 0
+  max_batch_size: 1
+  fp16: true
+  int8: false
+  max_seq_length: 512
+
+  # TensorRT builder workspace (bytes)
+  trt_workspace_bytes: 1073741824  # 1 GiB
+
+# ── SNN Runtime ──────────────────────────────────────────────────────────────
+snn:
+  enabled: false
+  backend: "gpu_cuda"            # gpu_cuda | neuromorphic | cpu_reference
+  encoding: "rate_coding"         # rate_coding | temporal_coding | latency_coding | delta_modulation
+  num_timesteps: 100
+  threshold: 1.0
+  tau_mem: 10.0
+  tau_syn: 5.0
+  weight_path: "models/snn_traffic_classifier.pt"
+  device_id: 0
+
+# ── Evaluation / Benchmarking ────────────────────────────────────────────────
+evaluation:
+  ground_truth_path: "data/ground_truth.json"
+  output_dir: "./eval_results"
+  warmup_iters: 10
+  benchmark_iters: 100
+  enable_gpu_profiling: true
+  iou_threshold: 0.5
+  evaluate_snn: false
+
+# ── Traffic Violation Classes ────────────────────────────────────────────────
+violation_classes:
+  - "red_light_running"
+  - "illegal_lane_change"
+  - "speeding"
+  - "wrong_way_driving"
+  - "illegal_u_turn"
+  - "stop_sign_violation"
+  - "crosswalk_violation"
+  - "no_turn_on_red"
+  - "double_parking"
+  - "hit_and_run"
+  - "no_violation"
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"                   # DEBUG | INFO | WARN | ERROR
+  log_to_file: true
+  log_dir: "./logs"
+  log_inference_results: true     # Log every inference result to CSV

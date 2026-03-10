@@ -1,0 +1,6 @@
+# Serialized model files – do not commit to git
+*.onnx
+*.engine
+*.pt
+*.bin
+*.safetensors

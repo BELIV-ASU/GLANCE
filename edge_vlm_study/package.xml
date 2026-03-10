@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<!--
+  package.xml for edge_vlm_study
+
+  Project: Empirical Study of VLMs (7B) Performance on Edge
+           in Real-World Traffic Violations
+-->
+<package format="3">
+  <name>edge_vlm_study</name>
+  <version>0.1.0</version>
+  <description>
+    Edge deployment and evaluation of distilled 7B Vision-Language Models
+    for real-world traffic violation detection. Includes ROS 2 data ingestion,
+    TensorRT/ONNX Runtime inference, SNN runtime stubs, and benchmarking.
+  </description>
+
+  <maintainer email="rbaskar5@asu.edu">Rakshith Baskar</maintainer>
+  <license>MIT</license>
+
+  <!-- Build system -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- ROS 2 dependencies -->
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>rosbag2_cpp</depend>
+
+  <!-- System dependencies (not managed by rosdep) -->
+  <!-- <depend>libtorch</depend> -->
+  <!-- <depend>tensorrt</depend> -->
+  <!-- <depend>onnxruntime</depend> -->
+
+  <!-- Test dependencies -->
+  <test_depend>ament_lint_auto</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
