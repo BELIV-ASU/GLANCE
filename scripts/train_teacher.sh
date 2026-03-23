@@ -16,7 +16,7 @@ module load mamba/latest
 source activate new_beginning
 export PATH="${HOME}/.local/bin:${PATH}"
 export HF_HOME="/scratch/rbaskar5/.hf_cache"
-export HF_TOKEN="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"
+export HF_TOKEN=""
 # Restrict to single GPU – QLoRA 4-bit model (~10GB) fits on one A100-80GB.
 # Prevents Trainer from wrapping in DataParallel which causes CUBLAS errors.
 export CUDA_VISIBLE_DEVICES=0
