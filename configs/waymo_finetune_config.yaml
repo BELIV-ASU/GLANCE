@@ -1,0 +1,88 @@
+################################################################################
+# waymo_finetune_config.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+# Single-source configuration for fine-tuning 7B VLMs on Waymo images.
+# Used by: train_waymo.py, vlm_factory.py, waymo_dataset.py
+#
+# Switch models by changing `model.name` — everything else adapts.
+################################################################################
+
+# ── Model ────────────────────────────────────────────────────────────────────
+# Supported model_name values (see vlm_factory.py):
+#   "qwen2.5-vl-7b"   → Qwen/Qwen2.5-VL-7B-Instruct
+#   "qwen2.5-vl-32b"  → Qwen/Qwen2.5-VL-32B-Instruct
+#   "cosmos-r1-7b"     → nvidia/Cosmos-Reason1-7B
+#   "mimo-vl-7b"       → XiaomiMiMo/MiMo-VL-7B-RL
+#   "openvla-7b"       → openvla/openvla-7b
+#   "vila-7b"          → Efficient-Large-Model/VILA1.5-7B
+model:
+  name: "qwen2.5-vl-32b"
+  trust_remote_code: true
+  # Use eager attention — avoids SDPA cuBLAS bugs on A100 + CUDA 12.8
+  attn_implementation: "eager"
+  torch_dtype: "bfloat16"
+  # Keep the 32B model practical on current GPUs.
+  load_in_4bit: true
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true
+
+# ── LoRA (PEFT) ─────────────────────────────────────────────────────────────
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+# ── Dataset ──────────────────────────────────────────────────────────────────
+data:
+  # Root of raw Waymo data (tfrecords or extracted images)
+  waymo_root: "/scratch/rbaskar5/Dataset/waymo_front"
+  # Pre-built annotations (image_path + prompt + answer)
+  annotations_json: "/scratch/rbaskar5/Dataset/waymo_front/annotations/train.json"
+  val_annotations_json: "/scratch/rbaskar5/Dataset/waymo_front/annotations/val.json"
+  # Image resolution fed to the VLM vision encoder
+  image_size: [448, 448]
+  max_seq_length: 2048
+  max_samples: 0           # 0 = use all samples
+  num_workers: 4
+
+# ── Training ─────────────────────────────────────────────────────────────────
+training:
+  output_dir: "/scratch/rbaskar5/GLANCE/checkpoints/waymo_finetune"
+  num_epochs: 3
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 8    # effective batch = 2 GPUs × 2 × 8 = 32
+  learning_rate: 2.0e-5
+  lr_scheduler: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+
+  # Memory optimisations (critical for 7B on 2×A100-80GB)
+  gradient_checkpointing: true
+  bf16: true
+  tf32: true
+
+  # Logging / checkpointing
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  save_total_limit: 3
+  report_to: "none"         # "wandb" when ready
+
+  # Resume
+  resume_from_checkpoint: null
+
+# ── Accelerate / DeepSpeed ───────────────────────────────────────────────────
+distributed:
+  accelerate_config: "/scratch/rbaskar5/GLANCE/configs/accelerate_2gpu.yaml"
+  deepspeed_config: null     # set to ds_z2_config.json path to enable ZeRO-2

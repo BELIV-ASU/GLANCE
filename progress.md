@@ -161,3 +161,21 @@ Three distinct CUBLAS crashes were resolved:
 - **CUDA**: 12.8 (bundled with PyTorch 2.10)
 - **Python**: 3.12, conda env `new_beginning`
 - **Key packages**: transformers, peft 0.18.1, bitsandbytes 0.49.2, datasets 4.6.0, trl 0.29.0, accelerate
+
+---
+
+## Phase 9: Validation Visual Script (Image + Output)
+
+- Added `src/validate_with_visuals.py` for validation-time inference with visual inspection output.
+- Script reads a validation JSONL, runs model generation, and writes:
+  - `validation_results.jsonl` with prompt, ground truth, and model prediction.
+  - `visualizations/sample_XXXXX.png` with side-by-side image and text panel.
+- Visualization panel includes:
+  - Prompt text
+  - Ground truth text
+  - Model output text
+- Increased text readability for outputs by adding configurable `--font_size` (default 34), with larger section headers.
+- Supports base model + optional LoRA adapter via:
+  - `--base_model`
+  - `--adapter_path`
+- Added configurable display width for text panel via `--panel_width`.

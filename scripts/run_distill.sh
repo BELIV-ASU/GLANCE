@@ -5,7 +5,15 @@
 set -euo pipefail
 
 # ---- Environment ----
-source /scratch/rbaskar5/set.bash
+# ── Environment setup (matches set.bash) ─────────────────────────────────
+module load ffmpeg-6.0-gcc-12.1.0
+# Do NOT load cuda-12.9.0 — PyTorch 2.10 ships its own CUDA 12.8 runtime.
+# Loading cuda-12.9 causes CUBLAS_STATUS_INVALID_VALUE in bf16 matmuls.
+module load cuda-12.8.1-gcc-12.1.0
+module load cmake/3.30.2
+module load glibc-2.38-gcc-12.1.0
+module load mamba/latest
+source activate new_beginning
 
 # Reduce allocator fragmentation – avoids OOM spikes during KL log_softmax
 export PYTORCH_ALLOC_CONF=expandable_segments:True

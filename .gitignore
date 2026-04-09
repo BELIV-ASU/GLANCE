@@ -8,3 +8,8 @@ __pycache__/
 *.pyc
 viz_ckpt200/
 logs/
+results/
+reasoning_distillation/checkpoints/
+distilled_student/checkpoints/
+*.out
+*.bak
